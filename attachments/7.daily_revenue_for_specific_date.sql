@@ -1,0 +1,2 @@
+-- We can create a stored procedure here that accepts specific date, kept the query only for simplicity.
+SELECT o.order_date, SUM(o.total_amount) as date_revenue FROM `order` o WHERE o.order_date = '2026-04-10' GROUP BY o.order_date ;
