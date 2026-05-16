@@ -1,65 +1,70 @@
-# Mentorship E-commerce System
-
-## Week 04
-### Denormalized Tables with Recursive Relationships
-- Task: denormalize category table that has a recursive relationship.
-
-We can add a new column to the category table called hierarchy_path, which store the full path up to the parent node. My initial thought was that we can use json to do that, but while searching I found that there is a syntax commonly used,
-which is  '/1/2/4', known as the materialized path.
-
-#### AI Generated Data
-![Materialized Path Example](attachments/hierarchy_path.jpg)
-
-#### SQL Query to fetch Top Level Categories
-```roomsql
-SELECT dc.*, SUBSTRING_INDEX(dc.hierarchy_path,'/',1) as top_category  FROM ecommerce.denormalized_category dc;
-
-```
-Example of the output of the above query:
-![Top node](attachments/denormalized_table.png)
-
-- One more enhancment is create a function that fetches the category of the specified level, or the last level available.
-
-### Products with Specific Keyword
-- Task: Write a SQL query to search for all products with the word "camera" in either the product name or description.
-```roomsql
-SELECT product_id, name FROM products WHERE LOWER(name) LIKE '%camera%';
-```
-Example of the output of the above query:
-![Camera in name](attachments/camera_in_name.jpg)
-
-### Top 5 Popular Products for in The Same Category for The Same Brand
-- Task: Can you design a query to suggest popular products in the same category for the same author, excluding the Purchsed product from the recommendations?
-
-Bought product:
-![Bought Product](attachments/bought_product.jpg)
-
-Products Similar to the Bought Product:
-```roomsql
-with current_product as (
-    select product_id, category_id, brand_id
-    from products where product_id = 2
-),
-other_products_from_same_category as (
-    select p.product_id, p.name, p.price, c.name category_name, b.name brand_name from products p
-    join categories c on p.category_id = c.category_id
-    join brands b on p.brand_id = b.brand_id
-    where product_id not in (select product_id from current_product cp)
-        and c.category_id in (select cp.category_id from current_product cp)
-         and b.brand_id in (select cp.brand_id from current_product cp)
-),
-popular_products as (
-    select op.product_id, op.name, op.category_name, op.brand_name, op.price, SUM(quantity) total_sold,
-    row_number() OVER (ORDER BY SUM(quantity) DESC) as popularity_rate
-    FROM orderdetails od
-        join  other_products_from_same_category op on od.product_id = op.product_id
-		group by op.product_id, op.name, op.category_name, op.brand_name, op.price
-		order by total_sold desc
-)
-select * from popular_products pp where pp.popularity_rate <= 5;
+# DB Concurrency 
+## Field Level Locks
+- Task: *Write a transaction query to lock the field quantity with product id = 211 from being updated.*
+- MySQL doesn't support field locks out of the box, but we can do a workaround to lock specific columns in specific row (field lock). 
+### Solution: Another Table for a High Traffic Column
+	
+- The basic idea is to create a new table for the field quantity, that has a fk to the product table, and do the locking on that table. We then can regroup the two tables in one view so for easiness.
+```sql
+	USE ecommerce;
+	
+	CREATE TABLE product_quantity (
+		product_id bigint unsigned PRIMARY KEY,
+		stock_quantity  INT UNSIGNED NOT NULL DEFAULT 0,
+		FOREIGN KEY (product_id) REFERENCES products (product_id) ON DELETE CASCADE
+	);
+	
+	START TRANSACTION;
+	BEGIN;
+		INSERT INTO product_quantity (product_id, stock_quantity) select product_id, stock_quantity from products;
+		ALTER TABLE products DROP COLUMN stock_quantity;
+	COMMIT;
+	
+	-- now locking the quantity field for specific user - this will lock the field (column: quantity, row: product_id = 211) 
+	-- from being updated while keeping other columns free to update.
+	START TRANSACTION;
+	BEGIN;
+		SELECT product_id, stock_quantity FROM product_quantity WHERE product_id = 1 FOR UPDATE;
+		-- do whatever operation.  
+		-- example update product_quantity set stock_quantity=stock_quantity-1 where product_id = 1;   
+	COMMIT;
+	
+	
+	-- another user can still update other columns
+	-- 
+	USE ecommerce;
+	START TRANSACTION;
+	BEGIN;
+		SELECT * FROM products WHERE product_id = 1 FOR UPDATE;
+		-- do whatever operation.    
+		-- example update products set price=price+100 where product_id = 1;   
+	COMMIT;
 ```
 
-Example of the output of the above query:
-![Top 5 popular products example](attachments/top_5_popular.jpg)
+- Practical demonstration
+	- Disabled auto commit for demonstration.
+    - Two users can update other fields than the field quantity in the same time.
+		- ![Field Lock: Two Users Other Fields](attachments/field_lock_two_users_other_fields.png)
+	- Two users can't update the quantity in the same time, notice it is hanging on the right side.
+		- ![Field Lock: Quantity Blocked](attachments/field_lock_quantity_blocked.png)
+    - Then it times out.
+      - ![Field Lock: Timeout Error](attachments/field_lock_timeout_error.png)
 
----
+## Row Level Locks
+- *Task:  Write a transaction query to lock row with product id = 211 from being updated.*
+ Solution:
+```
+USE ecommerce;
+START TRANSACTION;
+BEGIN;
+	SELECT * FROM PRODUCTS WHERE product_id = 211 FOR UPDATE;
+    -- here we can update the row or do whatever operation
+COMMIT;
+```
+- Practical demonstration
+	- I disabled auto commit for demonstration.
+	- Process one [on the left] acquired the lock for row 211;
+	- Process two [on the right] tried to acquire the same update lock (X Lock) for the same row.
+	- Process two hanged.
+	- After a while, process two raised an error after the allowed time trying to acquire a lock has exceeded.
+	- ![Row Lock: Process Locked](attachments/oneProcessIsLockedByAnotherOne.jpg)
